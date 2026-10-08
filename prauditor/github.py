@@ -109,7 +109,7 @@ def fetch_pr(owner: str, repo: str, number: int) -> PRData:
     )
 
 def list_open_prs(owner: str, repo: str, limit: int = 30) -> List[PRData]:
-    """List open PRs. Fetches file diffs for each PR so checkers have data."""
+    """List open PRs. File diffs are loaded lazily via ensure_files_loaded()."""
     headers = _get_headers()
     url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page={limit}"
     r = requests.get(url, headers=headers)
@@ -124,21 +124,29 @@ def list_open_prs(owner: str, repo: str, limit: int = 30) -> List[PRData]:
 
     prs = []
     for data in r.json():
-        number = data['number']
-        files, total_add, total_del = _fetch_files(owner, repo, number)
         prs.append(PRData(
-            owner=owner, repo=repo, number=number,
+            owner=owner, repo=repo, number=data['number'],
             title=data.get('title', ''),
             body=data.get('body', '') or '',
             author=data.get('user', {}).get('login', ''),
             base=data.get('base', {}).get('ref', ''),
             head=data.get('head', {}).get('ref', ''),
-            files=files,
-            total_additions=total_add,
-            total_deletions=total_del,
+            files=[],  # loaded lazily
+            total_additions=data.get('additions', 0),
+            total_deletions=data.get('deletions', 0),
             url=data.get('html_url', '')
         ))
     return prs
+
+def ensure_files_loaded(pr: PRData) -> PRData:
+    """Fetch file diffs for a PR if not already loaded. Returns updated PRData."""
+    if pr.files:
+        return pr  # already loaded
+    files, total_add, total_del = _fetch_files(pr.owner, pr.repo, pr.number)
+    pr.files = files
+    pr.total_additions = total_add
+    pr.total_deletions = total_del
+    return pr
 
 def add_label(owner: str, repo: str, number: int, label: str):
     headers = _get_headers()

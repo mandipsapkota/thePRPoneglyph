@@ -187,26 +187,67 @@ def check_references_symbol(claim, pr) -> CheckResult:
         evidence=f"All referenced symbol(s) {symbols} found in the diff."
     )
 
-def check_other(claim, pr) -> CheckResult:
-    return CheckResult(
-        claim=claim.model_dump(), status=Status.UNVERIFIABLE,
-        evidence="This claim type cannot be verified deterministically."
-    )
+def check_other(backend, claim, pr) -> CheckResult:
+    # Use LLM to verify custom claims by providing the diff
+    diff_text = "\n".join([f"File: {f.filename}\n{f.patch}" for f in pr.files if f.patch])
+    # Limit diff text size to avoid blowing up the context window
+    diff_text = diff_text[:15000] 
+    
+    prompt = f"""
+Given the following code changes (diff) from a Pull Request, evaluate whether the following claim is SUPPORTED or CONTRADICTED by the code changes.
+If there is not enough information to tell, reply UNVERIFIABLE.
+You MUST reply with EXACTLY one of those three words on the first line, followed by a short 1-sentence reason on the second line.
+
+Claim: "{claim.text}"
+
+Diff:
+{diff_text}
+"""
+    try:
+        response = backend.generate(prompt).strip().split('\n')
+        status_word = response[0].strip().upper()
+        reason = response[1].strip() if len(response) > 1 else "LLM verification completed."
+        
+        if "SUPPORTED" in status_word:
+            status = Status.SUPPORTED
+        elif "CONTRADICTED" in status_word:
+            status = Status.CONTRADICTED
+        else:
+            status = Status.UNVERIFIABLE
+            
+        return CheckResult(
+            claim=claim.model_dump(), status=status,
+            evidence=f"(LLM Verified) {reason}"
+        )
+    except Exception as e:
+        return CheckResult(
+            claim=claim.model_dump(), status=Status.UNVERIFIABLE,
+            evidence=f"LLM verification failed: {str(e)}"
+        )
 
 # ── Registry ─────────────────────────────────────────────────────────────────
 
 _DISPATCH = {
-    "adds_tests": check_adds_tests,
-    "docs_only": check_docs_only,
-    "typo_fix": check_typo_fix,
-    "no_behavior_change": check_no_behavior_change,
-    "references_symbol": check_references_symbol,
+    "adds_tests": lambda b, c, p: check_adds_tests(c, p),
+    "docs_only": lambda b, c, p: check_docs_only(c, p),
+    "typo_fix": lambda b, c, p: check_typo_fix(c, p),
+    "no_behavior_change": lambda b, c, p: check_no_behavior_change(c, p),
+    "references_symbol": lambda b, c, p: check_references_symbol(c, p),
     "other": check_other,
 }
 
-def verify_claims(claims, pr) -> List[CheckResult]:
+def verify_claims(backend, claims, pr) -> List[CheckResult]:
+    import concurrent.futures
+    
     results = []
-    for claim in claims:
-        checker = _DISPATCH.get(claim.type.value, check_other)
-        results.append(checker(claim, pr))
+    # Run checkers concurrently to speed up LLM verification
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        futures = []
+        for claim in claims:
+            checker = _DISPATCH.get(claim.type.value, check_other)
+            futures.append(executor.submit(checker, backend, claim, pr))
+            
+        for future in concurrent.futures.as_completed(futures):
+            results.append(future.result())
+            
     return results
