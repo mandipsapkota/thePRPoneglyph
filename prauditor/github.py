@@ -70,7 +70,24 @@ def fetch_pr(owner: str, repo: str, number: int) -> PRData:
     )
 
 def list_open_prs(owner: str, repo: str, limit: int = 30):
-    return []
+    headers = _get_headers()
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls?state=open&per_page={limit}"
+    r = requests.get(url, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub API Error {r.status_code}: {r.text}")
+    
+    prs = []
+    for data in r.json():
+        prs.append(PRData(
+            owner=owner, repo=repo, number=data['number'],
+            title=data.get('title', ''), body=data.get('body', '') or '',
+            author=data.get('user', {}).get('login', ''),
+            base=data.get('base', {}).get('ref', ''),
+            head=data.get('head', {}).get('ref', ''),
+            files=[], total_additions=0, total_deletions=0,
+            url=data.get('html_url', '')
+        ))
+    return prs
 
 def post_comment(owner: str, repo: str, number: int, body: str):
     pass
