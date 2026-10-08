@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prauditor"
+version = "0.1.0"
+description = "Is your PR genuine?"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai",
+    "requests",
+    "pydantic>=2.0.0",
+    "python-dotenv",
+    "streamlit",
+    "pytest"
+]
+
+[project.scripts]
+prauditor = "prauditor.cli:main"
