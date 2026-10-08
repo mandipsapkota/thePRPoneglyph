@@ -136,11 +136,21 @@ with col_detail:
 
         st.markdown(f"## [#{selected.number}] {selected.title}")
         st.caption(f"👤 Author: **{selected.author}** · 🌿 `{selected.base}` ← `{selected.head}` · [View on GitHub ↗]({selected.url})")
+        st.caption(f"📊 `+{selected.total_additions}` additions  `−{selected.total_deletions}` deletions  across `{len(selected.files)}` file(s)")
         st.divider()
 
         # What the author wrote
         with st.expander("📝 What the author wrote", expanded=True):
             st.markdown(selected.body if selected.body.strip() else "_No description provided._")
+
+        # Diff summary
+        if selected.files:
+            with st.expander(f"📁 Changed files ({len(selected.files)})"):
+                for f in selected.files:
+                    st.markdown(f"- `{f.filename}` — **{f.status}** `+{f.additions}` `−{f.deletions}`")
+                    if f.patch:
+                        with st.expander(f"  View diff: {f.filename}", expanded=False):
+                            st.code(f.patch, language="diff")
 
         st.divider()
 
