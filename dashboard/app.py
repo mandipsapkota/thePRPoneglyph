@@ -1,168 +1,218 @@
 import os
+import sys
+import importlib
 import streamlit as st
 from dotenv import load_dotenv
 
-# Load env variables (Token and Keys)
 load_dotenv(override=True)
 
-import sys
-import importlib
-
-# Force reload modules so we bypass Streamlit/Python caching
+# Force reload prauditor modules on each run
 for module_name in list(sys.modules.keys()):
     if module_name.startswith("prauditor"):
-        importlib.reload(sys.modules[module_name])
+        try:
+            importlib.reload(sys.modules[module_name])
+        except Exception:
+            pass
 
-from prauditor.github import fetch_pr, list_open_prs, get_pr_state, approve_pr, merge_pr, close_pr, get_authenticated_user, log_action
+from prauditor.github import fetch_pr, list_open_prs, close_pr
 from prauditor.backends import get_backend
 from prauditor.claims import extract_claims
 from prauditor.checkers.base import Status, verify_claims
 from prauditor.verdict import evaluate_verdict
 
-st.set_page_config(layout="wide", page_title="prauditor")
+st.set_page_config(layout="wide", page_title="prauditor — Is your PR genuine?", page_icon="🔍")
 
-# Default session state initialization
-if "prs" not in st.session_state:
-    st.session_state.prs = []
-if "selected_pr" not in st.session_state:
-    st.session_state.selected_pr = None
-if "audit_results" not in st.session_state:
-    st.session_state.audit_results = {}
+# Session state defaults
+for key in ["prs", "selected_pr", "audit_results"]:
+    if key not in st.session_state:
+        st.session_state[key] = [] if key == "prs" else (None if key == "selected_pr" else {})
 
-# --- SIDEBAR ---
+# ─── SIDEBAR ────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.title("prauditor Setup")
-    
+    st.title("🔍 prauditor")
+    st.caption("Is your PR genuine?")
+    st.divider()
+
     token = os.getenv("GITHUB_TOKEN")
     if token:
-        st.success("GitHub Token: Valid (Hidden)")
+        st.success("✅ GitHub Token connected")
     else:
-        st.error("GitHub Token: Missing! (Please set GITHUB_TOKEN in .env)")
-        
-    repo_input = st.text_input("Repository", placeholder="e.g. psf/requests")
-    backend_select = st.multiselect("LLM Backends", ["gemini", "ollama"], default=["gemini"])
-    
-    if st.button("Load open PRs"):
+        st.error("❌ GITHUB_TOKEN missing in .env")
+
+    repo_input = st.text_input("Repository", placeholder="owner/repo  e.g. psf/requests")
+    backends_selected = st.multiselect(
+        "LLM Backends", ["gemini", "ollama"], default=["gemini"],
+        help="Select one or more backends to evaluate PRs with"
+    )
+
+    col_load, col_all = st.columns(2)
+    with col_load:
+        load_clicked = st.button("📥 Load PRs", use_container_width=True)
+    with col_all:
+        eval_all_clicked = st.button("⚡ Evaluate All", use_container_width=True)
+
+    if load_clicked:
         if not repo_input or "/" not in repo_input:
-            st.error("Please enter a valid owner/repo format.")
+            st.error("Enter a valid owner/repo")
         else:
-            owner, repo = repo_input.split("/")
-            with st.spinner("Fetching open PRs..."):
+            owner, repo = repo_input.strip().split("/", 1)
+            with st.spinner("Fetching open PRs…"):
                 try:
                     prs = list_open_prs(owner, repo)
+                    st.session_state.prs = prs
+                    st.session_state.audit_results = {}
                     if not prs:
                         st.info("No open PRs found.")
-                    st.session_state.prs = prs
+                    else:
+                        st.success(f"Loaded {len(prs)} open PR(s)")
                 except Exception as e:
-                    st.error(f"Error fetching PRs: {str(e)}")
+                    st.error(f"Error: {e}")
 
-    if st.button("Evaluate All PRs"):
+    if eval_all_clicked:
         if not st.session_state.prs:
-            st.warning("Please load PRs first.")
-        elif not backend_select:
-            st.warning("Please select at least one LLM Backend.")
+            st.warning("Load PRs first.")
+        elif not backends_selected:
+            st.warning("Select at least one backend.")
         else:
-            with st.spinner("Evaluating all PRs..."):
-                for pr in st.session_state.prs:
-                    for b_name in backend_select:
-                        backend = get_backend(b_name)
-                        extraction = extract_claims(backend, pr.title, pr.body)
-                        if extraction.ok:
-                            results = verify_claims(extraction.claims, pr)
-                            verdict, reasons = evaluate_verdict(results)
-                            st.session_state.audit_results[f"{pr.number}_{b_name}"] = {
-                                "verdict": verdict,
-                                "reasons": reasons,
-                                "results": results
-                            }
+            progress = st.progress(0, text="Evaluating…")
+            total = len(st.session_state.prs) * len(backends_selected)
+            done = 0
+            for pr in st.session_state.prs:
+                for b_name in backends_selected:
+                    backend = get_backend(b_name)
+                    extraction = extract_claims(backend, pr.title, pr.body)
+                    if extraction.ok and extraction.claims:
+                        results = verify_claims(extraction.claims, pr)
+                        verdict, reasons, improvements = evaluate_verdict(results)
+                    else:
+                        verdict, reasons, improvements = "review_needed", ["No claims extracted."], []
+                    st.session_state.audit_results[f"{pr.number}_{b_name}"] = {
+                        "verdict": verdict, "reasons": reasons,
+                        "improvements": improvements, "claims": extraction.claims
+                    }
+                    done += 1
+                    progress.progress(done / total, text=f"PR #{pr.number} via {b_name}…")
+            progress.empty()
+            st.success("All PRs evaluated!")
 
-# --- MAIN LAYOUT ---
-col1, col2 = st.columns([1, 2])
+# ─── MAIN AREA ───────────────────────────────────────────────────────────────
+col_list, col_detail = st.columns([1, 2], gap="large")
 
-# Left Column: PR List
-with col1:
+# LEFT: PR list
+with col_list:
     st.subheader("Open Pull Requests")
-    
     if not st.session_state.prs:
-        st.write("No PRs loaded yet. Use the sidebar to load a repository.")
+        st.info("Use the sidebar to load a repository.")
     else:
         for pr in st.session_state.prs:
             with st.container(border=True):
-                st.markdown(f"**#{pr.number}**: {pr.title}")
-                st.caption(f"Author: {pr.author} | Branch: {pr.head}")
-                
-                # Show verdict summary if evaluated
-                for b_name in ["gemini", "ollama"]:
+                st.markdown(f"**#{pr.number}** {pr.title}")
+                st.caption(f"👤 {pr.author}  ·  🌿 `{pr.head}`")
+
+                # Verdict badges for each backend
+                for b_name in backends_selected:
                     key = f"{pr.number}_{b_name}"
                     if key in st.session_state.audit_results:
                         v = st.session_state.audit_results[key]["verdict"]
-                        color = "green" if v == "genuine description" else "red" if v == "fake description" else "orange"
-                        st.markdown(f"**{b_name.upper()}**: :{color}[{v}]")
-                
-                if st.button(f"View PR #{pr.number}", key=f"btn_view_{pr.number}"):
+                        badge = "🟢 Genuine" if v == "genuine" else "🟡 Review needed"
+                        st.markdown(f"`{b_name.upper()}` {badge}")
+
+                if st.button(f"View details", key=f"view_{pr.number}", use_container_width=True):
                     st.session_state.selected_pr = pr
 
-# Right Column: Detail View
-with col2:
-    st.subheader("PR Detail View")
-    
+# RIGHT: Detail view
+with col_detail:
     selected = st.session_state.selected_pr
+
     if selected is None:
-        st.info("Select a PR from the left to view details.")
+        st.info("Select a PR from the list to see its full audit report.")
     else:
-        st.markdown(f"### [#{selected.number}] {selected.title}")
-        st.caption(f"Author: {selected.author} | [View on GitHub]({selected.url})")
-        
-        st.markdown("#### What the author wrote")
-        st.info(selected.body if selected.body else "_No description provided._")
-        
-        st.markdown("#### Audit Verdict")
-        
-        if st.button("Audit this PR", type="primary"):
-            if not backend_select:
-                st.warning("Please select at least one LLM Backend.")
-            else:
-                with st.spinner("Running Audit Pipeline..."):
-                    for b_name in backend_select:
-                        st.write(f"**Running with {b_name}...**")
-                        backend = get_backend(b_name)
-                        
-                        extraction = extract_claims(backend, selected.title, selected.body)
-                        if not extraction.ok:
-                            st.error(f"Failed to extract claims: {extraction.error}")
-                        else:
-                            results = verify_claims(extraction.claims, selected)
-                            verdict, reasons = evaluate_verdict(results)
-                            
-                            st.session_state.audit_results[f"{selected.number}_{b_name}"] = {
-                                "verdict": verdict,
-                                "reasons": reasons,
-                                "results": results
-                            }
-        
-        # Display results and Actions
-        for b_name in ["gemini", "ollama"]:
+        # Header
+        close_col, _ = st.columns([1, 5])
+        with close_col:
+            if st.button("✕ Close", use_container_width=True):
+                st.session_state.selected_pr = None
+                st.rerun()
+
+        st.markdown(f"## [#{selected.number}] {selected.title}")
+        st.caption(f"👤 Author: **{selected.author}** · 🌿 `{selected.base}` ← `{selected.head}` · [View on GitHub ↗]({selected.url})")
+        st.divider()
+
+        # What the author wrote
+        with st.expander("📝 What the author wrote", expanded=True):
+            st.markdown(selected.body if selected.body.strip() else "_No description provided._")
+
+        st.divider()
+
+        # Audit controls
+        st.subheader("🔬 Audit Verdict")
+        if not backends_selected:
+            st.warning("Select a backend in the sidebar first.")
+        elif st.button("Audit this PR", type="primary", use_container_width=True):
+            with st.spinner("Running audit pipeline…"):
+                for b_name in backends_selected:
+                    backend = get_backend(b_name)
+                    extraction = extract_claims(backend, selected.title, selected.body)
+                    if extraction.ok and extraction.claims:
+                        results = verify_claims(extraction.claims, selected)
+                        verdict, reasons, improvements = evaluate_verdict(results)
+                    else:
+                        verdict = "review_needed"
+                        reasons = [extraction.error or "No claims found in description."]
+                        improvements = ["Add clear, specific claims to the PR description."]
+                    st.session_state.audit_results[f"{selected.number}_{b_name}"] = {
+                        "verdict": verdict, "reasons": reasons,
+                        "improvements": improvements,
+                        "claims": extraction.claims if extraction.ok else []
+                    }
+
+        # Display results per backend
+        for b_name in backends_selected:
             key = f"{selected.number}_{b_name}"
-            if key in st.session_state.audit_results:
-                res = st.session_state.audit_results[key]
-                st.markdown(f"### Results from {b_name.upper()}")
-                
-                if res["verdict"] == "genuine description":
-                    st.success("Verdict: Genuine Description")
-                elif res["verdict"] == "fake description":
-                    st.error("Verdict: Fake Description")
-                    
-                    st.markdown("#### Actions")
-                    if st.button(f"Reject & Close PR (Delete)", key=f"del_{key}", type="primary"):
+            if key not in st.session_state.audit_results:
+                continue
+
+            res = st.session_state.audit_results[key]
+            verdict = res["verdict"]
+
+            st.markdown(f"### `{b_name.upper()}` Results")
+
+            if verdict == "genuine":
+                st.success("✅ Verdict: **Genuine** — All claims are supported by the diff.")
+            else:
+                st.warning("🟡 Verdict: **Review Needed** — One or more claims could not be verified.")
+
+            # Reasons
+            with st.expander("📋 Detailed Reasoning", expanded=True):
+                for r in res["reasons"]:
+                    st.write(f"- {r}")
+
+            # Improvements
+            if res.get("improvements"):
+                with st.expander("💡 Possible Improvements"):
+                    for imp in res["improvements"]:
+                        st.info(imp)
+
+            # Raw claims
+            if res.get("claims"):
+                with st.expander("🔍 Raw extracted claims (LLM output)"):
+                    st.json([c.model_dump() for c in res["claims"]])
+
+            # Close PR action (available for review_needed)
+            if verdict == "review_needed":
+                st.divider()
+                st.markdown("#### ⚠️ Actions")
+                note = st.text_area(
+                    "Rejection note (required)",
+                    placeholder="Thank you for your contribution. After review, the claims in this PR could not be verified against the diff. Please see the audit report for details.",
+                    key=f"note_{key}"
+                )
+                if st.button(f"❌ Reject & Close PR #{selected.number}", key=f"close_{key}", type="primary"):
+                    if not note.strip():
+                        st.error("Please write a rejection note before closing.")
+                    else:
                         try:
-                            # Note: GitHub doesn't allow deleting PRs, so we close it.
                             close_pr(selected.owner, selected.repo, selected.number)
-                            st.success(f"Successfully closed PR #{selected.number}")
+                            st.success(f"PR #{selected.number} has been closed.")
                         except Exception as e:
-                            st.error(f"Failed to close PR: {str(e)}")
-                else:
-                    st.warning("Verdict: Needs human review")
-                    
-                with st.expander("Reasons", expanded=True):
-                    for r in res["reasons"]:
-                        st.write(f"- {r}")
+                            st.error(f"Could not close PR: {e}")

@@ -107,8 +107,20 @@ def approve_pr(owner: str, repo: str, number: int, body: str):
 def merge_pr(owner: str, repo: str, number: int, merge_method="squash", expected_head_sha=""):
     pass
 
+def post_comment(owner: str, repo: str, number: int, body: str):
+    headers = _get_headers()
+    url = f"https://api.github.com/repos/{owner}/{repo}/issues/{number}/comments"
+    r = requests.post(url, headers=headers, json={"body": body})
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"Could not post comment: {r.status_code} {r.text}")
+
 def close_pr(owner: str, repo: str, number: int):
-    pass
+    headers = _get_headers()
+    url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{number}"
+    r = requests.patch(url, headers=headers, json={"state": "closed"})
+    if r.status_code != 200:
+        raise RuntimeError(f"Could not close PR: {r.status_code} {r.text}")
 
 def log_action(repo: str, number: int, action: str, head_sha: str, verdict: str, maintainer: str):
     pass
+
